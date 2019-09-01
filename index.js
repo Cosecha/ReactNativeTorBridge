@@ -19,21 +19,12 @@ function downloadCallback(success, dataString) {
 	}
 
 }
-/*
-var TorURLDownloaderX = NativeModules.TorURLDownloader.getInstance();
+
+
+var TorURLDownloaderX = NativeModules.TorURLDownloaderJSBridge
 console.log("@@@@@@@@@@@@@@@@@")
-console.log("TYPE: " + typeof(NativeModules.TorURLDownloader))
-console.log("keys: " + Object.keys(NativeModules.TorURLDownloader))
-console.log("!!!!!!!!!!!!!!!!!")
-console.log("wtf is ? " + TorURLDownloaderX.connect)
-console.log("and, waht is ? " + TorURLDownloaderX.download)
-TorURLDownloaderX.connect() // unnecessary, just testing
-TorURLDownloaderX.download('https://check.torproject.org', downloadCallback);
-*/
-var TorURLDownloaderX = NativeModules.ShittyTorURLDownloader
-console.log("@@@@@@@@@@@@@@@@@")
-console.log("TYPE: " + typeof(NativeModules.ShittyTorURLDownloader))
-console.log("keys: " + Object.keys(NativeModules.ShittyTorURLDownloader))
+console.log("TYPE: " + typeof(NativeModules.TorURLDownloaderJSBridge))
+console.log("keys: " + Object.keys(NativeModules.TorURLDownloaderJSBridge))
 console.log("!!!!!!!!!!!!!!!!!")
 console.log("and, waht is ? " + TorURLDownloaderX.download)
 TorURLDownloaderX.download('https://check.torproject.org', downloadCallback);

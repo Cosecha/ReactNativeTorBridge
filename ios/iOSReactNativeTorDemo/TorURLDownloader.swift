@@ -15,22 +15,31 @@ extension Data {
     }
 }
 
-/* this is necessary to allow the init() of TorURLLoader to throw an error/fail
- https://bugs.swift.org/browse/SR-4681?focusedCommentId=24127&page=com.atlassian.jira.plugin.system.issuetabpanels:comment-tabpanel#comment-24127
- Seems to be a current limitation of Swift
- */
-/*class Dummy: NSObject {
- 
-    public init(_: String) {
-    }
-}*/
 
-@objc(ShittyTorURLDownloader)
-class ShittyTorURLDownloader : NSObject {
+@objc(TorURLDownloaderJSBridge)
+class TorURLDownloaderJSBridge : NSObject {
+    public func connect() -> Bool {
+        guard let downloader = TorURLDownloader.getInstance() else {
+            print("UHOH!!!! error constructing singleton TorURLDownloader")
+            return false
+        }
+        return downloader.connect()
+    }
+    
+    public func disconnect() {
+        guard let downloader = TorURLDownloader.getInstance() else {
+            print("UHOH!!!! error constructing singleton TorURLDownloader")
+            return
+        }
+        downloader.disconnect()
+    }
+    
+    
     @objc(download:completion:)
     public func download(urlString: String, completion: @escaping RCTResponseSenderBlock ) {
         guard let downloader = TorURLDownloader.getInstance() else {
             print("UHOH!!!!")
+            completion([false, "error constructing singleton TorURLDownloader"])
             return
         }
         downloader.download(urlString: urlString, completion: completion)
@@ -44,7 +53,6 @@ class ShittyTorURLDownloader : NSObject {
  -I'm not an actual iOS dev, who knows what else I made ugly
  */
 
-//@objc(TorURLDownloader)
 class TorURLDownloader {
     //MARK: properties
     static var singletonInstance: TorURLDownloader?
@@ -70,24 +78,6 @@ class TorURLDownloader {
         case TorConnectionError
         case HTTPError
     }
-    
-    //MARK: bad initializer, Swift is dumb
-    /*override init() {
-        print("ERROR WARNING!!!")
-        print("YOU ARE USING THE WRONG INITIALIZER")
-        print("THIS WILL PROBABLY FAIL SOON")
-        print("Use TorURLDownloader.getInstance() please!")
-        print("But there is currently no way in Swift to completely omit this overriding initializer")
-        print("https://bugs.swift.org/browse/SR-4681?focusedCommentId=24127&page=com.atlassian.jira.plugin.system.issuetabpanels:comment-tabpanel#comment-24127")
-        configuration = TorConfiguration()
-        configuration.dataDirectory = URL(fileURLWithPath: TorURLDownloader.createTorDirectory())
-        configuration.controlSocket = configuration.dataDirectory?.appendingPathComponent("control_port")
-        configuration.arguments = ["--ignore-missing-torrc"]
-        connectionLock = DispatchSemaphore(value: 1)
-        sessionLock = DispatchSemaphore(value: 1)
-        requestLock = DispatchSemaphore(value: 1)
-        controller = TorController(socketURL: configuration.controlSocket!)
-    }*/
     
     //MARK: initializers
     private init() throws {
@@ -122,24 +112,8 @@ class TorURLDownloader {
         print("tor init ok")
     }
     
-    //@objc(getInstance)
-    public class func getInstance() -> TorURLDownloader? {
-        if singletonInstance == nil {
-            do {
-                try singletonInstance = TorURLDownloader.init()
-            } catch {
-                print("error constructing singleton TorURLDownloader")
-                return nil
-            }
-        }
-        return singletonInstance
-    }
     
-    //@objc(getInstance)
-    public func getInstance() -> TorURLDownloader? {
-        return TorURLDownloader.getInstance()
-    }
-    
+    //MARK: private methods
     // https://github.com/iCepa/Tor.framework/issues/48#issuecomment-501944299
     private class func createTorDirectory() -> String {
         let torPath = self.getTorPath()
@@ -170,7 +144,28 @@ class TorURLDownloader {
     }
     
     private func isConnected() -> Bool {
-        return session != nil
+        return session != nil && controller.isConnected
+    }
+    
+    private func resetDisconnectTimer() {
+        if disconnectTimer != nil {
+            disconnectTimer?.invalidate()
+            // set a timer to disconnect Tor in 10 minutes if we don't use it again
+            disconnectTimer = Timer.scheduledTimer(timeInterval: 600.0, target: self, selector: #selector(disconnect), userInfo: nil, repeats: false)
+        }
+    }
+    
+    //MARK: public methods
+    public class func getInstance() -> TorURLDownloader? {
+        if singletonInstance == nil {
+            do {
+                try singletonInstance = TorURLDownloader.init()
+            } catch {
+                print("error constructing singleton TorURLDownloader")
+                return nil
+            }
+        }
+        return singletonInstance
     }
     
     @objc(disconnect)
@@ -189,7 +184,6 @@ class TorURLDownloader {
         requestLock.signal()
     }
     
-    //@objc(connect)
     public func connect() -> Bool {
         print("connecting to tor")
         connectionLock.wait()
@@ -268,15 +262,8 @@ class TorURLDownloader {
         return true
     }
     
-    private func resetDisconnectTimer() {
-        if disconnectTimer != nil {
-            disconnectTimer?.invalidate()
-            // set a timer to disconnect Tor in 10 minutes if we don't use it again
-            disconnectTimer = Timer.scheduledTimer(timeInterval: 600.0, target: self, selector: #selector(disconnect), userInfo: nil, repeats: false)
-        }
-    }
+
     
-    //@objc(download:completion:)
     public func download(urlString: String, completion: @escaping RCTResponseSenderBlock ) {
         // do all of this on another thread because we may have to wait for locks
         // and we definitely have to wait for the various other threads we're going to call
