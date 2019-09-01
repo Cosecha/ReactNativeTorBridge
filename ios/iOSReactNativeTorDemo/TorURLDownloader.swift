@@ -10,19 +10,57 @@ import Foundation
 import Tor
 
 extension Data {
-  func hexEncodedString() -> String {
-    return map { String(format: "%02hhx", $0) }.joined()
-  }
+    func hexEncodedString() -> String {
+        return map { String(format: "%02hhx", $0) }.joined()
+    }
 }
 
-@objc(TorURLDownloader)
-class TorURLDownloader : NSObject {
+/* this is necessary to allow the init() of TorURLLoader to throw an error/fail
+ https://bugs.swift.org/browse/SR-4681?focusedCommentId=24127&page=com.atlassian.jira.plugin.system.issuetabpanels:comment-tabpanel#comment-24127
+ Seems to be a current limitation of Swift
+ */
+/*class Dummy: NSObject {
+ 
+    public init(_: String) {
+    }
+}*/
+
+@objc(ShittyTorURLDownloader)
+class ShittyTorURLDownloader : NSObject {
+    @objc(download:completion:)
+    public func download(urlString: String, completion: @escaping RCTResponseSenderBlock ) {
+        guard let downloader = TorURLDownloader.getInstance() else {
+            print("UHOH!!!!")
+            return
+        }
+        downloader.download(urlString: urlString, completion: completion)
+    }
+}
+
+/*
+ Issues/todo:
+ -This uses several semaphores for locking. This is probably confusing and not idiomatic, and maybe I just got it wrong!
+ -Maybe could make better use of GCD async patterns
+ -I'm not an actual iOS dev, who knows what else I made ugly
+ */
+
+//@objc(TorURLDownloader)
+class TorURLDownloader {
     //MARK: properties
+    static var singletonInstance: TorURLDownloader?
     var configuration: TorConfiguration
-    var session: URLSession!
+    
     var queue = DispatchQueue(label: "myqueue", qos: .userInitiated)
+    var disconnectTimer: Timer?
+    
     var connectionLock: DispatchSemaphore
+    var session: URLSession!
+    var controller: TorController
+    var cookieURL: URL!
+    
     var sessionLock: DispatchSemaphore
+    var requestLock: DispatchSemaphore
+    
     
     //MARK: enums
     enum TorError: Error {
@@ -33,11 +71,28 @@ class TorURLDownloader : NSObject {
         case HTTPError
     }
     
-    //MARK: initializers
-    override init() {
-        //isConnected = false
+    //MARK: bad initializer, Swift is dumb
+    /*override init() {
+        print("ERROR WARNING!!!")
+        print("YOU ARE USING THE WRONG INITIALIZER")
+        print("THIS WILL PROBABLY FAIL SOON")
+        print("Use TorURLDownloader.getInstance() please!")
+        print("But there is currently no way in Swift to completely omit this overriding initializer")
+        print("https://bugs.swift.org/browse/SR-4681?focusedCommentId=24127&page=com.atlassian.jira.plugin.system.issuetabpanels:comment-tabpanel#comment-24127")
         configuration = TorConfiguration()
-
+        configuration.dataDirectory = URL(fileURLWithPath: TorURLDownloader.createTorDirectory())
+        configuration.controlSocket = configuration.dataDirectory?.appendingPathComponent("control_port")
+        configuration.arguments = ["--ignore-missing-torrc"]
+        connectionLock = DispatchSemaphore(value: 1)
+        sessionLock = DispatchSemaphore(value: 1)
+        requestLock = DispatchSemaphore(value: 1)
+        controller = TorController(socketURL: configuration.controlSocket!)
+    }*/
+    
+    //MARK: initializers
+    private init() throws {
+        configuration = TorConfiguration()
+        
         configuration.cookieAuthentication = true
         configuration.dataDirectory = URL(fileURLWithPath: TorURLDownloader.createTorDirectory())
         configuration.controlSocket = configuration.dataDirectory?.appendingPathComponent("control_port")
@@ -45,7 +100,44 @@ class TorURLDownloader : NSObject {
         
         connectionLock = DispatchSemaphore(value: 1)
         sessionLock = DispatchSemaphore(value: 1)
+        requestLock = DispatchSemaphore(value: 1)
+        
+        cookieURL = configuration.dataDirectory?.appendingPathComponent("control_auth_cookie")
+        
+        guard cookieURL != nil else {
+            print("something is wrong with the cookie URL!")
+            throw TorError.CookieError
+        }
+        
+        guard let ctrlSocket = configuration.controlSocket else {
+            print("something is wrong with the control socket!")
+            throw TorError.ControlSocketError
+        }
+        print("got cookie URL: \(cookieURL.absoluteString)")
+        
+        print("initializing controller")
+        controller = TorController(socketURL: ctrlSocket)
+        print("initialized controller")
+        
         print("tor init ok")
+    }
+    
+    //@objc(getInstance)
+    public class func getInstance() -> TorURLDownloader? {
+        if singletonInstance == nil {
+            do {
+                try singletonInstance = TorURLDownloader.init()
+            } catch {
+                print("error constructing singleton TorURLDownloader")
+                return nil
+            }
+        }
+        return singletonInstance
+    }
+    
+    //@objc(getInstance)
+    public func getInstance() -> TorURLDownloader? {
+        return TorURLDownloader.getInstance()
     }
     
     // https://github.com/iCepa/Tor.framework/issues/48#issuecomment-501944299
@@ -76,12 +168,34 @@ class TorURLDownloader : NSObject {
         
         return torDirectory
     }
-  
-    @objc(connect)
-    public func connect() -> Bool {
-      print("connecting to tor")
+    
+    private func isConnected() -> Bool {
+        return session != nil
+    }
+    
+    @objc(disconnect)
+    public func disconnect() {
+        requestLock.wait()
         connectionLock.wait()
-        if session != nil {
+        if disconnectTimer != nil {
+            disconnectTimer?.invalidate()
+            disconnectTimer = nil
+        }
+        if isConnected() {
+            controller.disconnect()
+            session = nil
+        }
+        connectionLock.signal()
+        requestLock.signal()
+    }
+    
+    //@objc(connect)
+    public func connect() -> Bool {
+        print("connecting to tor")
+        connectionLock.wait()
+        resetDisconnectTimer()
+        
+        if isConnected() {
             connectionLock.signal()
             return true
         }
@@ -90,26 +204,9 @@ class TorURLDownloader : NSObject {
         let thread: TorThread = TorThread(configuration: configuration)
         print("starting tor thread")
         thread.start()
-        sleep(3) // wait for TorThread to start
+        sleep(3) // wait for TorThread to start...not a good way to do this! TODO
         
-        asyncConnectionBlock: do {
-            guard let cookieURL: URL = configuration.dataDirectory?.appendingPathComponent("control_auth_cookie") else {
-                print("something is wrong with the cookie URL!")
-                sessionLock.signal()
-                break asyncConnectionBlock
-            }
-            
-            guard let ctrlSocket = configuration.controlSocket else {
-                print("something is wrong with the control socket!")
-                sessionLock.signal()
-                break asyncConnectionBlock
-            }
-            print("got cookie URL: \(cookieURL)")
-            
-            print("initializing controller")
-            let controller: TorController = TorController(socketURL: ctrlSocket)
-            print("initialized controller")
-                        
+        do {
             print("controller is connected 1? \(controller.isConnected)")
             if !controller.isConnected {
                 try controller.connect()
@@ -130,7 +227,7 @@ class TorURLDownloader : NSObject {
                 }
                 print("authenticated to tor control socket")
                 
-                controller.addObserver(forCircuitEstablished: { (established: Bool) -> Void in
+                self.controller.addObserver(forCircuitEstablished: { (established: Bool) -> Void in
                     print("observer called")
                     if (!established) {
                         print("circuit not established")
@@ -139,7 +236,7 @@ class TorURLDownloader : NSObject {
                     }
                     print("circuit established")
                     
-                    controller.getSessionConfiguration( { (sessionConfiguration: URLSessionConfiguration?) -> Void in
+                    self.controller.getSessionConfiguration( { (sessionConfiguration: URLSessionConfiguration?) -> Void in
                         guard let config = sessionConfiguration else {
                             print("missing session configuration")
                             self.sessionLock.signal()
@@ -171,46 +268,65 @@ class TorURLDownloader : NSObject {
         return true
     }
     
-
-    @objc(download:completion:)
+    private func resetDisconnectTimer() {
+        if disconnectTimer != nil {
+            disconnectTimer?.invalidate()
+            // set a timer to disconnect Tor in 10 minutes if we don't use it again
+            disconnectTimer = Timer.scheduledTimer(timeInterval: 600.0, target: self, selector: #selector(disconnect), userInfo: nil, repeats: false)
+        }
+    }
+    
+    //@objc(download:completion:)
     public func download(urlString: String, completion: @escaping RCTResponseSenderBlock ) {
         // do all of this on another thread because we may have to wait for locks
         // and we definitely have to wait for the various other threads we're going to call
+        requestLock.wait()
+        
+        resetDisconnectTimer()
+        
         queue.async {
             if self.session == nil {
                 /*do {
-                    try self.connect()
-                } catch let error {
-                    print("Connection error: \(error)")
-                    completion(false, nil)
+                 try self.connect()
+                 } catch let error {
+                 print("Connection error: \(error)")
+                 completion(false, nil)
+                 return
+                 }*/
+                let success = self.connect()
+                guard success else {
+                    print("Connection error...and this is hard to report to javascript")
+                    completion([false, "Failed to connect to Tor"])
+                    self.requestLock.signal()
                     return
-                }*/
-              let success = self.connect()
-              guard success else {
-                  print("Connection error...and this is hard to report to javascript")
-                  completion([false, nil])
-                  return
-              }
+                }
             }
-      
+            
             let url = URL(string: urlString)!
             //receivedData = Data()
             
             let task = self.session.dataTask(with: url) { data, response, error in
                 if let error = error {
                     print("error! \(error)")
-                    completion([false, nil])
+                    completion([false, "Error in Tor session dataTask"])
+                    self.requestLock.signal()
                     return
                 }
-                guard let httpResponse = response as? HTTPURLResponse,
-                    (200...299).contains(httpResponse.statusCode) else {
-                        print("http error!")
-                        completion([false, nil])
-                        return
+                guard let httpResponse = response as? HTTPURLResponse else {
+                    completion([false, "HTTP response is nil somehow?"])
+                    self.requestLock.signal()
+                    return
+                }
+                guard (200...299).contains(httpResponse.statusCode) else {
+                    print("http error! \(httpResponse.statusCode)")
+                    completion([false, "HTTP error for request: \(httpResponse)"])
+                    self.requestLock.signal()
+                    return
                 }
                 print("ok!")
                 if let data = data, let string = String(data: data, encoding: .utf8) {
                     completion([true, string])
+                    self.requestLock.signal()
                 }
             }
             task.resume()
