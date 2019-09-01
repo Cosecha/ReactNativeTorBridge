@@ -1,5 +1,6 @@
 /**
- * @format
+ * This is an example of how to use TorURLDownloaderJSBridge
+ * to download a file over Tor in React Native
  */
 
 import {AppRegistry} from 'react-native';
@@ -22,9 +23,5 @@ function downloadCallback(success, dataString) {
 
 
 var TorURLDownloaderX = NativeModules.TorURLDownloaderJSBridge
-console.log("@@@@@@@@@@@@@@@@@")
-console.log("TYPE: " + typeof(NativeModules.TorURLDownloaderJSBridge))
-console.log("keys: " + Object.keys(NativeModules.TorURLDownloaderJSBridge))
-console.log("!!!!!!!!!!!!!!!!!")
-console.log("and, waht is ? " + TorURLDownloaderX.download)
+
 TorURLDownloaderX.download('https://check.torproject.org', downloadCallback);
